@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -51,11 +52,18 @@ func NewRouter(
 	serviceRepo := database.NewServiceRepository(pool)
 	tokenCache := database.NewTokenCache(rdb, warnLogger)
 
+	// 2.5. Audit Client & Background Worker
+	auditClient := services.NewAuditClient(rdb, pool, infoLogger, errorLogger)
+	if auditClient != nil {
+		auditClient.StartWorker(context.Background())
+	}
+
 	// 3. Services
 	authSvc := services.NewAuthService(
 		authRepo,
 		jwtManager,
 		tokenCache,
+		auditClient,
 		mailClient,
 		cfg,
 		infoLogger,
@@ -65,6 +73,7 @@ func NewRouter(
 	serviceSvc := services.NewServiceService(
 		serviceRepo,
 		tokenCache,
+		auditClient,
 		cfg.JWTAccessSecret,
 		cfg.JWTAccessTTL,
 		infoLogger,
@@ -75,9 +84,11 @@ func NewRouter(
 	// 4. Middlewares & Handlers
 	authMW := customMiddleware.NewAuthMiddleware(jwtManager, pool, tokenCache, cfg.JWTAccessTTL, warnLogger, errorLogger)
 	authH := handlers.NewAuthHandler(authSvc, jwtManager)
-	userH := handlers.NewUserHandler(authSvc, authRepo, tokenCache)
+	userH := handlers.NewUserHandler(authSvc, authRepo, tokenCache, auditClient)
 	sessionH := handlers.NewSessionHandler(authSvc)
 	serviceH := handlers.NewServiceHandler(serviceSvc)
+	auditH := handlers.NewAuditHandler(auditClient)
+	dashboardH := handlers.NewDashboardHandler(pool, auditClient)
 	healthH := handlers.NewHealthHandler(pool, rdb, startTime)
 
 	// Register top-level /health route
@@ -90,6 +101,8 @@ func NewRouter(
 		RegisterUserRoutes(api, userH, authMW)
 		RegisterSessionRoutes(api, sessionH, authMW)
 		RegisterServiceRoutes(api, serviceH, authMW)
+		RegisterAuditRoutes(api, auditH, authMW)
+		RegisterDashboardRoutes(api, dashboardH, authMW)
 	})
 
 	return r

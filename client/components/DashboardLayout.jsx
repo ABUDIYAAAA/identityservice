@@ -18,6 +18,7 @@ import MenuItem from "@mui/material/MenuItem";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import Button from "@mui/material/Button";
 import { useAuth } from "@/hooks/useAuth";
+import UserSettingsModal from "./UserSettingsModal";
 
 const DRAWER_WIDTH = 260;
 
@@ -26,6 +27,7 @@ export default function DashboardLayout({ children }) {
   const pathname = usePathname();
 
   const [anchorEl, setAnchorEl] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const openUserMenu = Boolean(anchorEl);
 
   const handleOpenUserMenu = (event) => {
@@ -130,38 +132,77 @@ export default function DashboardLayout({ children }) {
             </ListItem>
 
             {user?.role === "admin" && (
-              <ListItem disablePadding>
-                <ListItemButton
-                  component={Link}
-                  href="/users"
-                  selected={pathname.startsWith("/users")}
-                  sx={{
-                    borderRadius: 2,
-                    mb: 0.5,
-                    "&.Mui-selected": {
-                      backgroundColor: "#f1f5f9",
-                      color: "text.primary",
-                      fontWeight: 600,
-                      "&:hover": {
-                        backgroundColor: "#e2e8f0",
+              <>
+                <ListItem disablePadding>
+                  <ListItemButton
+                    component={Link}
+                    href="/users"
+                    selected={pathname.startsWith("/users")}
+                    sx={{
+                      borderRadius: 2,
+                      mb: 0.5,
+                      "&.Mui-selected": {
+                        backgroundColor: "#f1f5f9",
+                        color: "text.primary",
+                        fontWeight: 600,
+                        "&:hover": {
+                          backgroundColor: "#e2e8f0",
+                        },
                       },
-                    },
-                  }}
-                >
-                  <ListItemText
-                    primary={
-                      <Typography
-                        sx={{
-                          fontSize: "0.9rem",
-                          fontWeight: pathname.startsWith("/users") ? 600 : 500,
-                        }}
-                      >
-                        Users
-                      </Typography>
-                    }
-                  />
-                </ListItemButton>
-              </ListItem>
+                    }}
+                  >
+                    <ListItemText
+                      primary={
+                        <Typography
+                          sx={{
+                            fontSize: "0.9rem",
+                            fontWeight: pathname.startsWith("/users")
+                              ? 600
+                              : 500,
+                          }}
+                        >
+                          Users
+                        </Typography>
+                      }
+                    />
+                  </ListItemButton>
+                </ListItem>
+
+                <ListItem disablePadding>
+                  <ListItemButton
+                    component={Link}
+                    href="/audit-logs"
+                    selected={pathname.startsWith("/audit-logs")}
+                    sx={{
+                      borderRadius: 2,
+                      mb: 0.5,
+                      "&.Mui-selected": {
+                        backgroundColor: "#f1f5f9",
+                        color: "text.primary",
+                        fontWeight: 600,
+                        "&:hover": {
+                          backgroundColor: "#e2e8f0",
+                        },
+                      },
+                    }}
+                  >
+                    <ListItemText
+                      primary={
+                        <Typography
+                          sx={{
+                            fontSize: "0.9rem",
+                            fontWeight: pathname.startsWith("/audit-logs")
+                              ? 600
+                              : 500,
+                          }}
+                        >
+                          Audit Logs
+                        </Typography>
+                      }
+                    />
+                  </ListItemButton>
+                </ListItem>
+              </>
             )}
 
             <ListItem disablePadding>
@@ -299,6 +340,21 @@ export default function DashboardLayout({ children }) {
             <Divider sx={{ my: 1 }} />
 
             <MenuItem
+              onClick={() => {
+                handleCloseUserMenu();
+                setSettingsOpen(true);
+              }}
+              sx={{
+                borderRadius: 1.5,
+                fontWeight: 600,
+                fontSize: "0.875rem",
+                py: 1,
+              }}
+            >
+              Account Settings
+            </MenuItem>
+
+            <MenuItem
               onClick={handleSignOut}
               sx={{
                 borderRadius: 1.5,
@@ -312,6 +368,11 @@ export default function DashboardLayout({ children }) {
             </MenuItem>
           </Menu>
         </Box>
+
+        <UserSettingsModal
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+        />
       </Drawer>
 
       {/* Main Content Container */}

@@ -8,6 +8,7 @@ import (
 
 	"devclub.com/identity/internal/api/dto"
 	"devclub.com/identity/internal/api/middlewares"
+	"devclub.com/identity/internal/api/models"
 	"devclub.com/identity/internal/api/services"
 	"devclub.com/identity/internal/database"
 	"devclub.com/identity/pkg/utils"
@@ -18,13 +19,15 @@ type UserHandler struct {
 	authService services.AuthService
 	repo        database.AuthRepository
 	tokenCache  database.TokenCache
+	auditClient services.AuditClient
 }
 
-func NewUserHandler(authService services.AuthService, repo database.AuthRepository, tokenCache database.TokenCache) *UserHandler {
+func NewUserHandler(authService services.AuthService, repo database.AuthRepository, tokenCache database.TokenCache, auditClient services.AuditClient) *UserHandler {
 	return &UserHandler{
 		authService: authService,
 		repo:        repo,
 		tokenCache:  tokenCache,
+		auditClient: auditClient,
 	}
 }
 
@@ -152,7 +155,8 @@ func (h *UserHandler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	utils.Created(w, "Invitation sent successfully", inv)
 }
 
-func (h *UserHandler) UpdateRole(w http.ResponseWriter, r *http.Request) {
+func (s *UserHandler) UpdateRole(w http.ResponseWriter, r *http.Request) {
+	adminID, _ := middlewares.GetUserID(r.Context())
 	userID := chi.URLParam(r, "id")
 
 	var req dto.UpdateUserRoleRequest
@@ -167,7 +171,9 @@ func (h *UserHandler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.repo.UpdateUserRole(r.Context(), userID, req.Role); err != nil {
+	beforeUser, _ := s.repo.GetUserByID(r.Context(), userID)
+
+	if err := s.repo.UpdateUserRole(r.Context(), userID, req.Role); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			utils.NotFound(w, "User not found")
 			return
@@ -176,14 +182,31 @@ func (h *UserHandler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.tokenCache != nil {
-		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	}
+
+	if s.auditClient != nil {
+		var beforeState any
+		if beforeUser != nil {
+			beforeState = map[string]any{"role": beforeUser.Role}
+		}
+		s.auditClient.LogEvent(r.Context(), models.AuditLogEvent{
+			ActionType:  services.AuditActionUserRoleUpdated,
+			ActorType:   "user",
+			ActorID:     adminID,
+			BeforeState: beforeState,
+			AfterState:  map[string]any{"role": req.Role, "target_user_id": userID},
+			IPAddress:   r.RemoteAddr,
+			UserAgent:   r.UserAgent(),
+		})
 	}
 
 	utils.Success(w, "User role updated successfully", nil)
 }
 
-func (h *UserHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+func (s *UserHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	adminID, _ := middlewares.GetUserID(r.Context())
 	userID := chi.URLParam(r, "id")
 
 	var req dto.UpdateUserStatusRequest
@@ -198,7 +221,9 @@ func (h *UserHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.repo.UpdateUserStatus(r.Context(), userID, *req.IsActive); err != nil {
+	beforeUser, _ := s.repo.GetUserByID(r.Context(), userID)
+
+	if err := s.repo.UpdateUserStatus(r.Context(), userID, *req.IsActive); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			utils.NotFound(w, "User not found")
 			return
@@ -207,17 +232,36 @@ func (h *UserHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.tokenCache != nil {
-		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	}
+
+	if s.auditClient != nil {
+		var beforeState any
+		if beforeUser != nil {
+			beforeState = map[string]any{"is_active": beforeUser.IsActive}
+		}
+		s.auditClient.LogEvent(r.Context(), models.AuditLogEvent{
+			ActionType:  services.AuditActionUserStatusUpdated,
+			ActorType:   "user",
+			ActorID:     adminID,
+			BeforeState: beforeState,
+			AfterState:  map[string]any{"is_active": *req.IsActive, "target_user_id": userID},
+			IPAddress:   r.RemoteAddr,
+			UserAgent:   r.UserAgent(),
+		})
 	}
 
 	utils.Success(w, "User status updated successfully", nil)
 }
 
-func (h *UserHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
+func (s *UserHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
+	adminID, _ := middlewares.GetUserID(r.Context())
 	userID := chi.URLParam(r, "id")
 
-	if err := h.repo.DeleteUser(r.Context(), userID); err != nil {
+	beforeUser, _ := s.repo.GetUserByID(r.Context(), userID)
+
+	if err := s.repo.DeleteUser(r.Context(), userID); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			utils.NotFound(w, "User not found")
 			return
@@ -226,8 +270,23 @@ func (h *UserHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.tokenCache != nil {
-		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	}
+
+	if s.auditClient != nil {
+		var beforeState any
+		if beforeUser != nil {
+			beforeState = map[string]any{"email": beforeUser.Email, "role": beforeUser.Role}
+		}
+		s.auditClient.LogEvent(r.Context(), models.AuditLogEvent{
+			ActionType:  services.AuditActionUserDeleted,
+			ActorType:   "user",
+			ActorID:     adminID,
+			BeforeState: beforeState,
+			IPAddress:   r.RemoteAddr,
+			UserAgent:   r.UserAgent(),
+		})
 	}
 
 	utils.NoContent(w)

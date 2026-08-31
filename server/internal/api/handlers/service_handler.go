@@ -137,9 +137,10 @@ func (h *ServiceHandler) UpdateServiceStatus(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *ServiceHandler) DeleteService(w http.ResponseWriter, r *http.Request) {
+	adminID, _ := middlewares.GetUserID(r.Context())
 	serviceID := chi.URLParam(r, "id")
 
-	if err := h.serviceService.DeleteService(r.Context(), serviceID); err != nil {
+	if err := h.serviceService.DeleteService(r.Context(), serviceID, adminID); err != nil {
 		if errors.Is(err, services.ErrServiceNotFound) {
 			utils.NotFound(w, "Service not found")
 			return

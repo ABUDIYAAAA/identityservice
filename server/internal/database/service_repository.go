@@ -203,7 +203,7 @@ func (r *PostgresServiceRepository) ListServices(ctx context.Context, limit, off
 func (r *PostgresServiceRepository) ListAssignedServices(ctx context.Context, userID string, limit, offset int) ([]models.Service, int64, error) {
 	var total int64
 	countQuery := `SELECT COUNT(*) FROM user_services WHERE user_id = $1`
-	if err := r.db.QueryRow(ctx, countQuery).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, countQuery, userID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 

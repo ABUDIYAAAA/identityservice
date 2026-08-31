@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -94,9 +95,24 @@ function ServiceRow({ service, currentUser, onManageSecrets }) {
       >
         <TableCell>
           <Box>
-            <Typography variant="body2" fontWeight={600} color="text.primary">
-              {service.name}
-            </Typography>
+            <Link
+              href={`/services/${service.id}`}
+              style={{ textDecoration: "none" }}
+            >
+              <Typography
+                variant="body2"
+                fontWeight={600}
+                color="text.primary"
+                sx={{
+                  "&:hover": {
+                    textDecoration: "underline",
+                    color: "primary.main",
+                  },
+                }}
+              >
+                {service.name}
+              </Typography>
+            </Link>
             {service.description && (
               <Typography
                 variant="caption"
@@ -186,6 +202,15 @@ function ServiceRow({ service, currentUser, onManageSecrets }) {
               },
             }}
           >
+            <MenuItem
+              component={Link}
+              href={`/services/${service.id}`}
+              onClick={handleCloseMenu}
+              sx={{ fontSize: "0.85rem", py: 1, fontWeight: 600 }}
+            >
+              View Details
+            </MenuItem>
+
             <MenuItem
               onClick={() => {
                 handleCloseMenu();

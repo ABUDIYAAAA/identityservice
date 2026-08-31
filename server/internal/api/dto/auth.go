@@ -1,6 +1,10 @@
 package dto
 
-import "time"
+import (
+	"time"
+
+	"devclub.com/identity/internal/api/models"
+)
 
 type LoginRequest struct {
 	Email    string `json:"email" validate:"required,email"`
@@ -97,4 +101,11 @@ type PaginatedUsersResponse struct {
 	TotalCount int64          `json:"total_count"`
 	Page       int            `json:"page"`
 	Limit      int            `json:"limit"`
+}
+
+type PaginatedAuditLogsResponse struct {
+	AuditLogs  []models.AuditLogEvent `json:"audit_logs"`
+	TotalCount int64                  `json:"total_count"`
+	Page       int                    `json:"page"`
+	Limit      int                    `json:"limit"`
 }

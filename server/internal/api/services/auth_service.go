@@ -21,6 +21,7 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid email or password")
 	ErrUserInactive       = errors.New("user account is inactive")
+	ErrAccountLocked      = errors.New("account is temporarily locked due to 5 consecutive failed login attempts. Please try again in 15 minutes.")
 	ErrUserAlreadyExists  = errors.New("user with this email already exists")
 	ErrInviteNotFound     = errors.New("invite not found or expired")
 	ErrSessionNotFound    = errors.New("session not found")
@@ -48,33 +49,36 @@ type AuthService interface {
 }
 
 type authService struct {
-	repo       database.AuthRepository
-	jwtManager *utils.JWTManager
-	tokenCache database.TokenCache
-	mailer     *mailer.Mailer
-	cfg        *config.Config
-	infoLog    *slog.Logger
-	warnLog    *slog.Logger
-	errorLog   *slog.Logger
+	repo        database.AuthRepository
+	jwtManager  *utils.JWTManager
+	tokenCache  database.TokenCache
+	auditClient AuditClient
+	mailer      *mailer.Mailer
+	cfg         *config.Config
+	infoLog     *slog.Logger
+	warnLog     *slog.Logger
+	errorLog    *slog.Logger
 }
 
 func NewAuthService(
 	repo database.AuthRepository,
 	jwtManager *utils.JWTManager,
 	tokenCache database.TokenCache,
+	auditClient AuditClient,
 	mailer *mailer.Mailer,
 	cfg *config.Config,
 	infoLog, warnLog, errorLog *slog.Logger,
 ) AuthService {
 	return &authService{
-		repo:       repo,
-		jwtManager: jwtManager,
-		tokenCache: tokenCache,
-		mailer:     mailer,
-		cfg:        cfg,
-		infoLog:    infoLog,
-		warnLog:    warnLog,
-		errorLog:   errorLog,
+		repo:        repo,
+		jwtManager:  jwtManager,
+		tokenCache:  tokenCache,
+		auditClient: auditClient,
+		mailer:      mailer,
+		cfg:         cfg,
+		infoLog:     infoLog,
+		warnLog:     warnLog,
+		errorLog:    errorLog,
 	}
 }
 
@@ -83,8 +87,26 @@ func NewAuthService(
 // -----------------------------------------------------------------------------
 
 func (s *authService) Login(ctx context.Context, email, password, userAgent, ip string) (*utils.TokenPair, error) {
+	if s.tokenCache != nil {
+		locked, _, _ := s.tokenCache.IsAccountLocked(ctx, email)
+		if locked {
+			return nil, ErrAccountLocked
+		}
+	}
+
 	user, err := s.repo.GetUserByEmail(ctx, email)
 	if err != nil {
+		if s.auditClient != nil {
+			s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+				ActionType:   AuditActionUserLoginFailed,
+				ActorType:    "user",
+				Status:       "failure",
+				ErrorMessage: "Invalid credentials",
+				IPAddress:    ip,
+				UserAgent:    userAgent,
+				BeforeState:  map[string]any{"email": email},
+			})
+		}
 		if errors.Is(err, database.ErrNotFound) {
 			return nil, ErrInvalidCredentials
 		}
@@ -92,12 +114,58 @@ func (s *authService) Login(ctx context.Context, email, password, userAgent, ip 
 	}
 
 	if !user.IsActive {
+		if s.auditClient != nil {
+			s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+				ActionType:   AuditActionUserLoginFailed,
+				ActorType:    "user",
+				ActorID:      user.ID,
+				Status:       "failure",
+				ErrorMessage: "User inactive",
+				IPAddress:    ip,
+				UserAgent:    userAgent,
+			})
+		}
 		return nil, ErrUserInactive
 	}
 
 	match, err := utils.CheckPassword(password, user.PasswordHash)
 	if err != nil || !match {
+		if s.tokenCache != nil {
+			count, _ := s.tokenCache.IncrementFailedLogins(ctx, email)
+			if count >= 5 {
+				_ = s.tokenCache.LockAccount(ctx, email, 15*time.Minute)
+				if s.auditClient != nil {
+					s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+						ActionType:   AuditActionUserLoginLocked,
+						ActorType:    "user",
+						ActorID:      user.ID,
+						Status:       "failure",
+						ErrorMessage: "Account locked due to 5 failed login attempts",
+						IPAddress:    ip,
+						UserAgent:    userAgent,
+					})
+				}
+				return nil, ErrAccountLocked
+			}
+		}
+
+		if s.auditClient != nil {
+			s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+				ActionType:   AuditActionUserLoginFailed,
+				ActorType:    "user",
+				ActorID:      user.ID,
+				Status:       "failure",
+				ErrorMessage: "Invalid password",
+				IPAddress:    ip,
+				UserAgent:    userAgent,
+			})
+		}
 		return nil, ErrInvalidCredentials
+	}
+
+	// Reset failed login counter on successful authentication
+	if s.tokenCache != nil {
+		_ = s.tokenCache.ResetFailedLogins(ctx, email)
 	}
 
 	// Generate access and refresh tokens
@@ -114,6 +182,17 @@ func (s *authService) Login(ctx context.Context, email, password, userAgent, ip 
 
 	if s.tokenCache != nil {
 		_ = s.tokenCache.CacheUserStatus(ctx, user.ID, user.TokenVersion, user.IsActive, s.cfg.JWTAccessTTL)
+	}
+
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType: AuditActionUserLoginSuccess,
+			ActorType:  "user",
+			ActorID:    user.ID,
+			Status:     "success",
+			IPAddress:  ip,
+			UserAgent:  userAgent,
+		})
 	}
 
 	return tokens, nil

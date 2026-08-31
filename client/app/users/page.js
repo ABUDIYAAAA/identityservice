@@ -306,9 +306,19 @@ function UsersContent() {
 
   if (!isAdmin) {
     return (
-      <Paper elevation={0} sx={{ p: 4, borderRadius: 3, border: "1px solid", borderColor: "divider", textAlign: "center" }}>
+      <Paper
+        elevation={0}
+        sx={{
+          p: 4,
+          borderRadius: 3,
+          border: "1px solid",
+          borderColor: "divider",
+          textAlign: "center",
+        }}
+      >
         <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
-          Access Restricted: User management is restricted to administrators only.
+          Access Restricted: User management is restricted to administrators
+          only.
         </Alert>
         <Button component={Link} href="/" variant="outlined" sx={{ mt: 1 }}>
           Return to Dashboard
@@ -400,9 +410,11 @@ function UsersContent() {
                         <Skeleton variant="circular" width={34} height={34} />
                         <Skeleton variant="text" width={160} height={24} />
                       </Box>
-                      <TableCell>
-                        <Skeleton variant="rounded" width={50} height={24} />
-                      </TableCell>
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton variant="rounded" width={50} height={24} />
+                    </TableCell>
+                    <TableCell>
                       <Skeleton variant="rounded" width={60} height={24} />
                     </TableCell>
                     <TableCell>

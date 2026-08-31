@@ -46,7 +46,7 @@ type ServiceService interface {
 	GetService(ctx context.Context, serviceID, userID, userRole string) (*models.Service, error)
 	ListServices(ctx context.Context, userID, userRole string, limit, offset int) ([]models.Service, int64, error)
 	UpdateServiceStatus(ctx context.Context, serviceID string, isActive bool) error
-	DeleteService(ctx context.Context, serviceID string) error
+	DeleteService(ctx context.Context, serviceID, adminID string) error
 
 	// User-Service Assignment
 	AssignUser(ctx context.Context, userID, serviceID string) error
@@ -68,30 +68,33 @@ type ServiceService interface {
 }
 
 type serviceService struct {
-	repo       database.ServiceRepository
-	tokenCache database.TokenCache
-	jwtSecret  []byte
-	tokenTTL   time.Duration
-	infoLog    *slog.Logger
-	warnLog    *slog.Logger
-	errorLog   *slog.Logger
+	repo        database.ServiceRepository
+	tokenCache  database.TokenCache
+	auditClient AuditClient
+	jwtSecret   []byte
+	tokenTTL    time.Duration
+	infoLog     *slog.Logger
+	warnLog     *slog.Logger
+	errorLog    *slog.Logger
 }
 
 func NewServiceService(
 	repo database.ServiceRepository,
 	tokenCache database.TokenCache,
+	auditClient AuditClient,
 	jwtAccessSecret string,
 	tokenTTL time.Duration,
 	infoLog, warnLog, errorLog *slog.Logger,
 ) ServiceService {
 	return &serviceService{
-		repo:       repo,
-		tokenCache: tokenCache,
-		jwtSecret:  []byte(jwtAccessSecret),
-		tokenTTL:   tokenTTL,
-		infoLog:    infoLog,
-		warnLog:    warnLog,
-		errorLog:   errorLog,
+		repo:        repo,
+		tokenCache:  tokenCache,
+		auditClient: auditClient,
+		jwtSecret:   []byte(jwtAccessSecret),
+		tokenTTL:    tokenTTL,
+		infoLog:     infoLog,
+		warnLog:     warnLog,
+		errorLog:    errorLog,
 	}
 }
 
@@ -134,6 +137,16 @@ func (s *serviceService) CreateService(ctx context.Context, name, description, a
 		return nil, nil, err
 	}
 
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType: AuditActionServiceCreated,
+			ActorType:  "user",
+			ActorID:    adminID,
+			ServiceID:  svc.ID,
+			AfterState: map[string]any{"name": name, "client_id": clientID},
+		})
+	}
+
 	return svc, &GeneratedSecretResponse{
 		Secret:    secret,
 		RawSecret: rawSecret,
@@ -164,6 +177,8 @@ func (s *serviceService) ListServices(ctx context.Context, userID, userRole stri
 }
 
 func (s *serviceService) UpdateServiceStatus(ctx context.Context, serviceID string, isActive bool) error {
+	beforeSvc, _ := s.repo.GetServiceByID(ctx, serviceID)
+
 	err := s.repo.UpdateServiceStatus(ctx, serviceID, isActive)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -174,10 +189,26 @@ func (s *serviceService) UpdateServiceStatus(ctx context.Context, serviceID stri
 	if s.tokenCache != nil {
 		_ = s.tokenCache.InvalidateServiceStatus(ctx, serviceID)
 	}
+
+	if s.auditClient != nil {
+		var beforeState any
+		if beforeSvc != nil {
+			beforeState = map[string]any{"is_active": beforeSvc.IsActive}
+		}
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType:  AuditActionServiceStatusUpdated,
+			ServiceID:   serviceID,
+			BeforeState: beforeState,
+			AfterState:  map[string]any{"is_active": isActive},
+		})
+	}
+
 	return nil
 }
 
-func (s *serviceService) DeleteService(ctx context.Context, serviceID string) error {
+func (s *serviceService) DeleteService(ctx context.Context, serviceID, adminID string) error {
+	beforeSvc, _ := s.repo.GetServiceByID(ctx, serviceID)
+
 	err := s.repo.DeleteService(ctx, serviceID)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -188,6 +219,21 @@ func (s *serviceService) DeleteService(ctx context.Context, serviceID string) er
 	if s.tokenCache != nil {
 		_ = s.tokenCache.InvalidateServiceStatus(ctx, serviceID)
 	}
+
+	if s.auditClient != nil {
+		var beforeState any
+		if beforeSvc != nil {
+			beforeState = map[string]any{"name": beforeSvc.Name, "client_id": beforeSvc.ClientID}
+		}
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType:  AuditActionServiceDeleted,
+			ActorType:   "user",
+			ActorID:     adminID,
+			ServiceID:   serviceID,
+			BeforeState: beforeState,
+		})
+	}
+
 	return nil
 }
 
@@ -196,7 +242,15 @@ func (s *serviceService) DeleteService(ctx context.Context, serviceID string) er
 // -----------------------------------------------------------------------------
 
 func (s *serviceService) AssignUser(ctx context.Context, userID, serviceID string) error {
-	return s.repo.AssignUserToService(ctx, userID, serviceID)
+	err := s.repo.AssignUserToService(ctx, userID, serviceID)
+	if err == nil && s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType: AuditActionServiceUserAssigned,
+			ServiceID:  serviceID,
+			AfterState: map[string]any{"assigned_user_id": userID},
+		})
+	}
+	return err
 }
 
 func (s *serviceService) RemoveUser(ctx context.Context, userID, serviceID string) error {
@@ -206,6 +260,13 @@ func (s *serviceService) RemoveUser(ctx context.Context, userID, serviceID strin
 			return ErrServiceNotFound
 		}
 		return err
+	}
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType:  AuditActionServiceUserRevoked,
+			ServiceID:   serviceID,
+			BeforeState: map[string]any{"revoked_user_id": userID},
+		})
 	}
 	return nil
 }
@@ -227,6 +288,16 @@ func (s *serviceService) GenerateSecret(ctx context.Context, serviceID, name str
 	secret, err := s.repo.CreateServiceSecret(ctx, serviceID, name, prefix, secretHash, expiresAt)
 	if err != nil {
 		return nil, err
+	}
+
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType: AuditActionServiceSecretGenerated,
+			ActorType:  "user",
+			ActorID:    userID,
+			ServiceID:  serviceID,
+			AfterState: map[string]any{"secret_name": name, "prefix": prefix},
+		})
 	}
 
 	return &GeneratedSecretResponse{
@@ -255,6 +326,17 @@ func (s *serviceService) DeleteSecret(ctx context.Context, secretID, serviceID, 
 		}
 		return err
 	}
+
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType:  AuditActionServiceSecretRevoked,
+			ActorType:   "user",
+			ActorID:     userID,
+			ServiceID:   serviceID,
+			BeforeState: map[string]any{"secret_id": secretID},
+		})
+	}
+
 	return nil
 }
 
@@ -264,8 +346,17 @@ func (s *serviceService) DeleteSecret(ctx context.Context, secretID, serviceID, 
 
 func (s *serviceService) AddPermission(ctx context.Context, sourceServiceID, targetServiceID string) error {
 	err := s.repo.AddServicePermission(ctx, sourceServiceID, targetServiceID)
-	if err == nil && s.tokenCache != nil {
-		_ = s.tokenCache.InvalidateServicePermission(ctx, sourceServiceID, targetServiceID)
+	if err == nil {
+		if s.tokenCache != nil {
+			_ = s.tokenCache.InvalidateServicePermission(ctx, sourceServiceID, targetServiceID)
+		}
+		if s.auditClient != nil {
+			s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+				ActionType: AuditActionServicePermGranted,
+				ServiceID:  sourceServiceID,
+				AfterState: map[string]any{"target_service_id": targetServiceID},
+			})
+		}
 	}
 	return err
 }
@@ -280,6 +371,13 @@ func (s *serviceService) RemovePermission(ctx context.Context, sourceServiceID, 
 	}
 	if s.tokenCache != nil {
 		_ = s.tokenCache.InvalidateServicePermission(ctx, sourceServiceID, targetServiceID)
+	}
+	if s.auditClient != nil {
+		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
+			ActionType:  AuditActionServicePermRevoked,
+			ServiceID:   sourceServiceID,
+			BeforeState: map[string]any{"target_service_id": targetServiceID},
+		})
 	}
 	return nil
 }

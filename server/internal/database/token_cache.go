@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -46,6 +47,12 @@ type TokenCache interface {
 	CacheServicePermission(ctx context.Context, sourceServiceID, targetServiceID string, allowed bool, ttl time.Duration) error
 	GetServicePermission(ctx context.Context, sourceServiceID, targetServiceID string) (allowed bool, cached bool, err error)
 	InvalidateServicePermission(ctx context.Context, sourceServiceID, targetServiceID string) error
+
+	// Brute-Force Lockout
+	IncrementFailedLogins(ctx context.Context, email string) (int64, error)
+	IsAccountLocked(ctx context.Context, email string) (bool, time.Duration, error)
+	LockAccount(ctx context.Context, email string, ttl time.Duration) error
+	ResetFailedLogins(ctx context.Context, email string) error
 }
 
 type redisTokenCache struct {
@@ -239,4 +246,50 @@ func (c *redisTokenCache) InvalidateServicePermission(ctx context.Context, sourc
 	}
 	key := fmt.Sprintf("service:perm:%s:%s", sourceServiceID, targetServiceID)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *redisTokenCache) IncrementFailedLogins(ctx context.Context, email string) (int64, error) {
+	if c.rdb == nil {
+		return 0, nil
+	}
+	key := fmt.Sprintf("lockout:failed:%s", strings.ToLower(email))
+	pipe := c.rdb.Pipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, 15*time.Minute)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return incr.Val(), nil
+}
+
+func (c *redisTokenCache) IsAccountLocked(ctx context.Context, email string) (bool, time.Duration, error) {
+	if c.rdb == nil {
+		return false, 0, nil
+	}
+	key := fmt.Sprintf("lockout:locked:%s", strings.ToLower(email))
+	ttl, err := c.rdb.TTL(ctx, key).Result()
+	if err == redis.Nil || ttl <= 0 {
+		return false, 0, nil
+	} else if err != nil {
+		return false, 0, err
+	}
+	return true, ttl, nil
+}
+
+func (c *redisTokenCache) LockAccount(ctx context.Context, email string, ttl time.Duration) error {
+	if c.rdb == nil {
+		return nil
+	}
+	key := fmt.Sprintf("lockout:locked:%s", strings.ToLower(email))
+	return c.rdb.Set(ctx, key, "1", ttl).Err()
+}
+
+func (c *redisTokenCache) ResetFailedLogins(ctx context.Context, email string) error {
+	if c.rdb == nil {
+		return nil
+	}
+	keyFailed := fmt.Sprintf("lockout:failed:%s", strings.ToLower(email))
+	keyLocked := fmt.Sprintf("lockout:locked:%s", strings.ToLower(email))
+	return c.rdb.Del(ctx, keyFailed, keyLocked).Err()
 }
