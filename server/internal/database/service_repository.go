@@ -20,6 +20,7 @@ var (
 type ServiceRepository interface {
 	// Service CRUD & Status
 	CreateService(ctx context.Context, name, description, clientID, createdBy string) (*models.Service, error)
+	CreateServiceWithInitialSecret(ctx context.Context, name, description, clientID, createdBy, secretName, prefix, secretHash string, expiresAt *time.Time) (*models.Service, *models.ServiceSecret, error)
 	GetServiceByID(ctx context.Context, id string) (*models.Service, error)
 	GetServiceByClientID(ctx context.Context, clientID string) (*models.Service, error)
 	ListServices(ctx context.Context, limit, offset int) ([]models.Service, int64, error)
@@ -76,6 +77,58 @@ func (r *PostgresServiceRepository) CreateService(ctx context.Context, name, des
 		return nil, err
 	}
 	return &s, nil
+}
+
+func (r *PostgresServiceRepository) CreateServiceWithInitialSecret(
+	ctx context.Context,
+	name, description, clientID, createdBy, secretName, prefix, secretHash string,
+	expiresAt *time.Time,
+) (*models.Service, *models.ServiceSecret, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	querySvc := `
+		INSERT INTO services (name, description, client_id, created_by)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, name, COALESCE(description, ''), client_id, is_active, token_version, created_by, created_at, updated_at
+	`
+	var s models.Service
+	err = tx.QueryRow(ctx, querySvc, name, description, clientID, createdBy).Scan(
+		&s.ID, &s.Name, &s.Description, &s.ClientID, &s.IsActive, &s.TokenVersion, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, nil, ErrDuplicateService
+		}
+		return nil, nil, err
+	}
+
+	querySec := `
+		INSERT INTO service_secrets (service_id, name, secret_prefix, secret_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, service_id, name, secret_prefix, last_used_at, expires_at, created_at
+	`
+	var sec models.ServiceSecret
+	err = tx.QueryRow(ctx, querySec, s.ID, secretName, prefix, secretHash, expiresAt).Scan(
+		&sec.ID, &sec.ServiceID, &sec.Name, &sec.SecretPrefix, &sec.LastUsedAt, &sec.ExpiresAt, &sec.CreatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, nil, ErrDuplicateSecretName
+		}
+		return nil, nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	return &s, &sec, nil
 }
 
 func (r *PostgresServiceRepository) GetServiceByID(ctx context.Context, id string) (*models.Service, error) {

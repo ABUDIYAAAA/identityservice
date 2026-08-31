@@ -124,18 +124,12 @@ func (s *serviceService) CreateService(ctx context.Context, name, description, a
 		return nil, nil, fmt.Errorf("failed to generate client_id: %w", err)
 	}
 
-	svc, err := s.repo.CreateService(ctx, name, description, clientID, adminID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Auto-generate initial default secret for the new service
 	rawSecret, prefix, secretHash, err := utils.GenerateClientSecret()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate client secret: %w", err)
 	}
 
-	secret, err := s.repo.CreateServiceSecret(ctx, svc.ID, "Primary Secret", prefix, secretHash, nil)
+	svc, secret, err := s.repo.CreateServiceWithInitialSecret(ctx, name, description, clientID, adminID, "Primary Secret", prefix, secretHash, nil)
 	if err != nil {
 		return nil, nil, err
 	}

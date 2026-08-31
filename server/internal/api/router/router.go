@@ -40,6 +40,7 @@ func NewRouter(
 	r := chi.NewMux()
 
 	// 1. Core Top-Level Middlewares
+	r.Use(customMiddleware.CORS(cfg.FrontendURL))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(customMiddleware.RequestLogger(infoLogger))
@@ -74,7 +75,7 @@ func NewRouter(
 	// 4. Middlewares & Handlers
 	authMW := customMiddleware.NewAuthMiddleware(jwtManager, pool, tokenCache, cfg.JWTAccessTTL, warnLogger, errorLogger)
 	authH := handlers.NewAuthHandler(authSvc, jwtManager)
-	userH := handlers.NewUserHandler(authSvc, authRepo)
+	userH := handlers.NewUserHandler(authSvc, authRepo, tokenCache)
 	sessionH := handlers.NewSessionHandler(authSvc)
 	serviceH := handlers.NewServiceHandler(serviceSvc)
 	healthH := handlers.NewHealthHandler(pool, rdb, startTime)

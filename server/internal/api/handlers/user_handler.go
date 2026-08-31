@@ -17,12 +17,14 @@ import (
 type UserHandler struct {
 	authService services.AuthService
 	repo        database.AuthRepository
+	tokenCache  database.TokenCache
 }
 
-func NewUserHandler(authService services.AuthService, repo database.AuthRepository) *UserHandler {
+func NewUserHandler(authService services.AuthService, repo database.AuthRepository, tokenCache database.TokenCache) *UserHandler {
 	return &UserHandler{
 		authService: authService,
 		repo:        repo,
+		tokenCache:  tokenCache,
 	}
 }
 
@@ -174,6 +176,10 @@ func (h *UserHandler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.tokenCache != nil {
+		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	}
+
 	utils.Success(w, "User role updated successfully", nil)
 }
 
@@ -201,6 +207,10 @@ func (h *UserHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.tokenCache != nil {
+		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
+	}
+
 	utils.Success(w, "User status updated successfully", nil)
 }
 
@@ -214,6 +224,10 @@ func (h *UserHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 		}
 		utils.InternalServerError(w, err)
 		return
+	}
+
+	if h.tokenCache != nil {
+		_ = h.tokenCache.InvalidateUserStatus(r.Context(), userID)
 	}
 
 	utils.NoContent(w)

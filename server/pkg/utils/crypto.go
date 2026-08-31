@@ -55,7 +55,7 @@ func GenerateClientSecret() (rawSecret string, prefix string, hash string, err e
 	}
 
 	rawSecret = fmt.Sprintf("sec_live_%s", hexStr)
-	prefix = rawSecret[:12] // e.g., "sec_live_a1b"
+	prefix = rawSecret[:10] // e.g., "sec_live_a"
 	hash = HashSHA256(rawSecret)
 
 	return rawSecret, prefix, hash, nil
