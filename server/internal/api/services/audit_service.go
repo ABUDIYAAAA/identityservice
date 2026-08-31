@@ -208,7 +208,7 @@ func (c *redisAuditClient) insertBatchDB(ctx context.Context, events []models.Au
 		}
 
 		var serviceID *string
-		if ev.ServiceID != "" {
+		if ev.ServiceID != "" && ev.ActionType != AuditActionServiceDeleted {
 			serviceID = &ev.ServiceID
 		}
 

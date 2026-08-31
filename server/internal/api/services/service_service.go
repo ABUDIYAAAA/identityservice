@@ -223,13 +223,15 @@ func (s *serviceService) DeleteService(ctx context.Context, serviceID, adminID s
 	if s.auditClient != nil {
 		var beforeState any
 		if beforeSvc != nil {
-			beforeState = map[string]any{"name": beforeSvc.Name, "client_id": beforeSvc.ClientID}
+			beforeState = map[string]any{"service_id": serviceID, "name": beforeSvc.Name, "client_id": beforeSvc.ClientID}
+		} else {
+			beforeState = map[string]any{"service_id": serviceID}
 		}
 		s.auditClient.LogEvent(ctx, models.AuditLogEvent{
 			ActionType:  AuditActionServiceDeleted,
 			ActorType:   "user",
 			ActorID:     adminID,
-			ServiceID:   serviceID,
+			ServiceID:   "",
 			BeforeState: beforeState,
 		})
 	}
