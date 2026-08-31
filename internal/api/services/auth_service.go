@@ -50,6 +50,7 @@ type AuthService interface {
 type authService struct {
 	repo       database.AuthRepository
 	jwtManager *utils.JWTManager
+	tokenCache database.TokenCache
 	mailer     *mailer.Mailer
 	cfg        *config.Config
 	infoLog    *slog.Logger
@@ -60,6 +61,7 @@ type authService struct {
 func NewAuthService(
 	repo database.AuthRepository,
 	jwtManager *utils.JWTManager,
+	tokenCache database.TokenCache,
 	mailer *mailer.Mailer,
 	cfg *config.Config,
 	infoLog, warnLog, errorLog *slog.Logger,
@@ -67,6 +69,7 @@ func NewAuthService(
 	return &authService{
 		repo:       repo,
 		jwtManager: jwtManager,
+		tokenCache: tokenCache,
 		mailer:     mailer,
 		cfg:        cfg,
 		infoLog:    infoLog,
@@ -107,6 +110,10 @@ func (s *authService) Login(ctx context.Context, email, password, userAgent, ip 
 	_, err = s.repo.CreateSession(ctx, user.ID, tokens.RefreshTokenHash, userAgent, ip, tokens.RefreshExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+
+	if s.tokenCache != nil {
+		_ = s.tokenCache.CacheUserStatus(ctx, user.ID, user.TokenVersion, user.IsActive, s.cfg.JWTAccessTTL)
 	}
 
 	return tokens, nil
@@ -154,6 +161,10 @@ func (s *authService) RefreshToken(ctx context.Context, rawRefreshToken, userAge
 		return nil, err
 	}
 
+	if s.tokenCache != nil {
+		_ = s.tokenCache.CacheUserStatus(ctx, user.ID, user.TokenVersion, user.IsActive, s.cfg.JWTAccessTTL)
+	}
+
 	return newTokens, nil
 }
 
@@ -161,6 +172,10 @@ func (s *authService) Logout(ctx context.Context, claims *utils.Claims, rawRefre
 	// Granularly revoke current access token by its JTI
 	if claims != nil && claims.ID != "" {
 		_ = s.repo.RevokeAccessToken(ctx, claims.ID, claims.UserID, claims.ExpiresAt.Time)
+		if s.tokenCache != nil {
+			_ = s.tokenCache.CacheRevokedJTI(ctx, claims.ID, s.cfg.JWTAccessTTL)
+			_ = s.tokenCache.InvalidateAccessToken(ctx, claims.ID)
+		}
 	}
 
 	// Invalidate corresponding refresh token
@@ -297,7 +312,11 @@ func (s *authService) ResetPassword(ctx context.Context, token, newPassword stri
 	}
 
 	// Update password and increment token_version (kills all previous sessions)
-	return s.repo.UpdateUserPassword(ctx, user.ID, newHash)
+	err = s.repo.UpdateUserPassword(ctx, user.ID, newHash)
+	if err == nil && s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(ctx, user.ID)
+	}
+	return err
 }
 
 func (s *authService) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
@@ -316,7 +335,11 @@ func (s *authService) ChangePassword(ctx context.Context, userID, oldPassword, n
 		return err
 	}
 
-	return s.repo.UpdateUserPassword(ctx, userID, newHash)
+	err = s.repo.UpdateUserPassword(ctx, userID, newHash)
+	if err == nil && s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(ctx, userID)
+	}
+	return err
 }
 
 // -----------------------------------------------------------------------------
@@ -341,5 +364,9 @@ func (s *authService) RevokeOtherSessions(ctx context.Context, userID, currentTo
 }
 
 func (s *authService) RevokeAllSessions(ctx context.Context, userID string) error {
-	return s.repo.RevokeAllUserSessions(ctx, userID)
+	err := s.repo.RevokeAllUserSessions(ctx, userID)
+	if err == nil && s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateUserStatus(ctx, userID)
+	}
+	return err
 }

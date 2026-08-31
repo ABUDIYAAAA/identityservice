@@ -16,6 +16,14 @@ type Config struct {
 	// Database
 	DBConn string `env:"DB_URL,required"`
 
+	// Redis
+	RedisURL      string `env:"REDIS_URL" envDefault:""`
+	RedisURI      string `env:"REDIS_URI" envDefault:""`
+	RedisHost     string `env:"REDIS_HOST" envDefault:"localhost"`
+	RedisPort     string `env:"REDIS_PORT" envDefault:"6379"`
+	RedisPassword string `env:"REDIS_PASSWORD" envDefault:""`
+	RedisDB       int    `env:"REDIS_DB" envDefault:"0"`
+
 	// JWT & Cookies
 	JWTAccessSecret  string        `env:"JWT_ACCESS_SECRET,required"`
 	JWTRefreshSecret string        `env:"JWT_REFRESH_SECRET,required"`

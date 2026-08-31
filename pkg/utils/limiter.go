@@ -81,13 +81,8 @@ func (rl *RateLimiter) startCleanup() {
 	}
 }
 
-// ExtractClientKey combines the real IP and the client-supplied Device ID.
-func ExtractClientKey(r *http.Request) string {
-	deviceID := strings.TrimSpace(r.Header.Get("X-Device-ID"))
-	if deviceID == "" {
-		deviceID = "anonymous_device"
-	}
-
+// GetClientIP extracts the real client IP address without port from HTTP request headers or RemoteAddr.
+func GetClientIP(r *http.Request) string {
 	ip := r.Header.Get("X-Forwarded-For")
 	if ip != "" {
 		// Take the first IP if multiple are present in X-Forwarded-For
@@ -106,5 +101,16 @@ func ExtractClientKey(r *http.Request) string {
 		}
 	}
 
+	return ip
+}
+
+// ExtractClientKey combines the real IP and the client-supplied Device ID.
+func ExtractClientKey(r *http.Request) string {
+	deviceID := strings.TrimSpace(r.Header.Get("X-Device-ID"))
+	if deviceID == "" {
+		deviceID = "anonymous_device"
+	}
+
+	ip := GetClientIP(r)
 	return fmt.Sprintf("%s:%s", ip, deviceID)
 }

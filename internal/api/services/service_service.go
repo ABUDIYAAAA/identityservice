@@ -68,27 +68,30 @@ type ServiceService interface {
 }
 
 type serviceService struct {
-	repo      database.ServiceRepository
-	jwtSecret []byte
-	tokenTTL  time.Duration
-	infoLog   *slog.Logger
-	warnLog   *slog.Logger
-	errorLog  *slog.Logger
+	repo       database.ServiceRepository
+	tokenCache database.TokenCache
+	jwtSecret  []byte
+	tokenTTL   time.Duration
+	infoLog    *slog.Logger
+	warnLog    *slog.Logger
+	errorLog   *slog.Logger
 }
 
 func NewServiceService(
 	repo database.ServiceRepository,
+	tokenCache database.TokenCache,
 	jwtAccessSecret string,
 	tokenTTL time.Duration,
 	infoLog, warnLog, errorLog *slog.Logger,
 ) ServiceService {
 	return &serviceService{
-		repo:      repo,
-		jwtSecret: []byte(jwtAccessSecret),
-		tokenTTL:  tokenTTL,
-		infoLog:   infoLog,
-		warnLog:   warnLog,
-		errorLog:  errorLog,
+		repo:       repo,
+		tokenCache: tokenCache,
+		jwtSecret:  []byte(jwtAccessSecret),
+		tokenTTL:   tokenTTL,
+		infoLog:    infoLog,
+		warnLog:    warnLog,
+		errorLog:   errorLog,
 	}
 }
 
@@ -174,6 +177,9 @@ func (s *serviceService) UpdateServiceStatus(ctx context.Context, serviceID stri
 		}
 		return err
 	}
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateServiceStatus(ctx, serviceID)
+	}
 	return nil
 }
 
@@ -184,6 +190,9 @@ func (s *serviceService) DeleteService(ctx context.Context, serviceID string) er
 			return ErrServiceNotFound
 		}
 		return err
+	}
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateServiceStatus(ctx, serviceID)
 	}
 	return nil
 }
@@ -260,7 +269,11 @@ func (s *serviceService) DeleteSecret(ctx context.Context, secretID, serviceID, 
 // -----------------------------------------------------------------------------
 
 func (s *serviceService) AddPermission(ctx context.Context, sourceServiceID, targetServiceID string) error {
-	return s.repo.AddServicePermission(ctx, sourceServiceID, targetServiceID)
+	err := s.repo.AddServicePermission(ctx, sourceServiceID, targetServiceID)
+	if err == nil && s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateServicePermission(ctx, sourceServiceID, targetServiceID)
+	}
+	return err
 }
 
 func (s *serviceService) RemovePermission(ctx context.Context, sourceServiceID, targetServiceID string) error {
@@ -270,6 +283,9 @@ func (s *serviceService) RemovePermission(ctx context.Context, sourceServiceID, 
 			return errors.New("permission link not found")
 		}
 		return err
+	}
+	if s.tokenCache != nil {
+		_ = s.tokenCache.InvalidateServicePermission(ctx, sourceServiceID, targetServiceID)
 	}
 	return nil
 }
@@ -330,6 +346,10 @@ func (s *serviceService) GenerateServiceToken(ctx context.Context, clientID, raw
 		return nil, fmt.Errorf("failed to sign service token: %w", err)
 	}
 
+	if s.tokenCache != nil {
+		_ = s.tokenCache.CacheServiceStatus(ctx, svc.ID, svc.TokenVersion, svc.IsActive, s.tokenTTL)
+	}
+
 	return &ServiceTokenResponse{
 		AccessToken: signedToken,
 		TokenType:   "Bearer",
@@ -364,21 +384,65 @@ func (s *serviceService) VerifyServiceToken(ctx context.Context, targetClientID,
 		return nil, ErrInvalidServiceToken
 	}
 
-	// 3. Real-time Caller State & Token Version Verification
-	callerService, err := s.repo.GetServiceByID(ctx, claims.ServiceID)
-	if err != nil {
-		return nil, ErrInvalidServiceToken
+	// 3. Real-time Caller State & Token Version Verification (Redis fast path)
+	var callerService *models.Service
+	var callerVersion int
+	var callerActive bool
+	foundStatusInCache := false
+
+	if s.tokenCache != nil {
+		if st, found, err := s.tokenCache.GetServiceStatus(ctx, claims.ServiceID); err == nil && found {
+			callerVersion = st.TokenVersion
+			callerActive = st.IsActive
+			foundStatusInCache = true
+		}
 	}
 
-	if !callerService.IsActive || callerService.TokenVersion != claims.TokenVersion {
-		return nil, ErrInvalidServiceToken
+	if foundStatusInCache {
+		if !callerActive || callerVersion != claims.TokenVersion {
+			return nil, ErrInvalidServiceToken
+		}
+		callerService = &models.Service{
+			ID:           claims.ServiceID,
+			ClientID:     claims.ClientID,
+			TokenVersion: callerVersion,
+			IsActive:     callerActive,
+		}
+	} else {
+		cs, err := s.repo.GetServiceByID(ctx, claims.ServiceID)
+		if err != nil {
+			return nil, ErrInvalidServiceToken
+		}
+		if !cs.IsActive || cs.TokenVersion != claims.TokenVersion {
+			return nil, ErrInvalidServiceToken
+		}
+		callerService = cs
+		if s.tokenCache != nil {
+			_ = s.tokenCache.CacheServiceStatus(ctx, cs.ID, cs.TokenVersion, cs.IsActive, s.tokenTTL)
+		}
 	}
 
-	// 4. Verify ACL Link Permissions (Can Caller access Target?)
-	hasPerm, err := s.repo.HasPermission(ctx, callerService.ID, targetService.ID)
-	if err != nil {
-		return nil, err
+	// 4. Verify ACL Link Permissions (Redis fast path)
+	hasPerm := false
+	foundPermInCache := false
+	if s.tokenCache != nil {
+		if allowed, cached, err := s.tokenCache.GetServicePermission(ctx, callerService.ID, targetService.ID); err == nil && cached {
+			hasPerm = allowed
+			foundPermInCache = true
+		}
 	}
+
+	if !foundPermInCache {
+		perm, err := s.repo.HasPermission(ctx, callerService.ID, targetService.ID)
+		if err != nil {
+			return nil, err
+		}
+		hasPerm = perm
+		if s.tokenCache != nil {
+			_ = s.tokenCache.CacheServicePermission(ctx, callerService.ID, targetService.ID, perm, s.tokenTTL)
+		}
+	}
+
 	if !hasPerm {
 		return nil, ErrAccessNotAllowed
 	}

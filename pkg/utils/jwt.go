@@ -140,16 +140,55 @@ func (m *JWTManager) verifyToken(tokenStr string, secret []byte) (*Claims, error
 	return claims, nil
 }
 
-const RefreshCookieName = "refresh_token"
+const (
+	AccessCookieName  = "access_token"
+	RefreshCookieName = "refresh_token"
+)
+
+func (m *JWTManager) SetAccessCookie(w http.ResponseWriter, accessToken string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     AccessCookieName,
+		Value:    accessToken,
+		Path:     "/",
+		Domain:   m.cookieDomain,
+		Expires:  expiresAt,
+		MaxAge:   int(time.Until(expiresAt).Seconds()),
+		HttpOnly: true,
+		Secure:   m.isProduction,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
 
 func (m *JWTManager) SetRefreshCookie(w http.ResponseWriter, refreshToken string, expiresAt time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     RefreshCookieName,
 		Value:    refreshToken,
-		Path:     "/api/v1/auth",
+		Path:     "/",
 		Domain:   m.cookieDomain,
 		Expires:  expiresAt,
 		MaxAge:   int(time.Until(expiresAt).Seconds()),
+		HttpOnly: true,
+		Secure:   m.isProduction,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (m *JWTManager) SetAuthCookies(w http.ResponseWriter, tokens *TokenPair) {
+	if tokens == nil {
+		return
+	}
+	m.SetAccessCookie(w, tokens.AccessToken, tokens.AccessExpiresAt)
+	m.SetRefreshCookie(w, tokens.RefreshToken, tokens.RefreshExpiresAt)
+}
+
+func (m *JWTManager) ClearAccessCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     AccessCookieName,
+		Value:    "",
+		Path:     "/",
+		Domain:   m.cookieDomain,
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   m.isProduction,
 		SameSite: http.SameSiteStrictMode,
@@ -160,7 +199,7 @@ func (m *JWTManager) ClearRefreshCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     RefreshCookieName,
 		Value:    "",
-		Path:     "/api/v1/auth",
+		Path:     "/",
 		Domain:   m.cookieDomain,
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
@@ -168,4 +207,9 @@ func (m *JWTManager) ClearRefreshCookie(w http.ResponseWriter) {
 		Secure:   m.isProduction,
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+func (m *JWTManager) ClearAuthCookies(w http.ResponseWriter) {
+	m.ClearAccessCookie(w)
+	m.ClearRefreshCookie(w)
 }

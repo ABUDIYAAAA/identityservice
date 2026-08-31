@@ -30,8 +30,10 @@ func NewPool(ctx context.Context, connString string, errorLogger *slog.Logger) (
 	defer cancel()
 
 	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("database ping failed: %w", err)
+		if errorLogger != nil {
+			errorLogger.Warn("database ping failed on startup", "error", err)
+		}
+		return pool, fmt.Errorf("database ping failed: %w", err)
 	}
 
 	return pool, nil

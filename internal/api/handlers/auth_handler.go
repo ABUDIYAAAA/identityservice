@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"devclub.com/identity/internal/api/dto"
 	"devclub.com/identity/internal/api/middlewares"
@@ -37,7 +36,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens, err := h.authService.Login(r.Context(), req.Email, req.Password, r.UserAgent(), r.RemoteAddr)
+	tokens, err := h.authService.Login(r.Context(), req.Email, req.Password, r.UserAgent(), utils.GetClientIP(r))
 	if err != nil {
 		if errors.Is(err, services.ErrInvalidCredentials) {
 			utils.Unauthorized(w, "Invalid email or password")
@@ -51,50 +50,34 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set secure HTTP-only refresh token cookie
-	h.jwtManager.SetRefreshCookie(w, tokens.RefreshToken, tokens.RefreshExpiresAt)
+	// Set secure HTTP-only cookies for access and refresh tokens
+	h.jwtManager.SetAuthCookies(w, tokens)
 
-	utils.Success(w, "Login successful", dto.AuthTokensResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		TokenType:    "Bearer",
-		ExpiresIn:    int64(time.Until(tokens.AccessExpiresAt).Seconds()),
-	})
+	utils.Success(w, "Login successful", nil)
 }
 
 func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	var rawRefreshToken string
 
-	// Prefer cookie, fallback to JSON payload
 	if cookie, err := r.Cookie(utils.RefreshCookieName); err == nil {
 		rawRefreshToken = cookie.Value
-	} else {
-		var req dto.RefreshTokenRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			rawRefreshToken = req.RefreshToken
-		}
 	}
 
 	if rawRefreshToken == "" {
-		utils.Unauthorized(w, "Refresh token required")
+		utils.Unauthorized(w, "Refresh token cookie required")
 		return
 	}
 
-	tokens, err := h.authService.RefreshToken(r.Context(), rawRefreshToken, r.UserAgent(), r.RemoteAddr)
+	tokens, err := h.authService.RefreshToken(r.Context(), rawRefreshToken, r.UserAgent(), utils.GetClientIP(r))
 	if err != nil {
-		h.jwtManager.ClearRefreshCookie(w)
+		h.jwtManager.ClearAuthCookies(w)
 		utils.Unauthorized(w, "Invalid or expired refresh token")
 		return
 	}
 
-	h.jwtManager.SetRefreshCookie(w, tokens.RefreshToken, tokens.RefreshExpiresAt)
+	h.jwtManager.SetAuthCookies(w, tokens)
 
-	utils.Success(w, "Token refreshed", dto.AuthTokensResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		TokenType:    "Bearer",
-		ExpiresIn:    int64(time.Until(tokens.AccessExpiresAt).Seconds()),
-	})
+	utils.Success(w, "Token refreshed successfully", nil)
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +89,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.authService.Logout(r.Context(), claims, rawRefreshToken)
-	h.jwtManager.ClearRefreshCookie(w)
+	h.jwtManager.ClearAuthCookies(w)
 
 	utils.Success(w, "Logged out successfully", nil)
 }

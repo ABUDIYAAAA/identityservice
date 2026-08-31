@@ -3,6 +3,7 @@ package router
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"devclub.com/identity/internal/api/config"
 	"devclub.com/identity/internal/api/handlers"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // AuthMiddleware interface for route protection
@@ -27,11 +29,13 @@ type AuthMiddleware interface {
 func NewRouter(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
+	rdb *redis.Client,
 	mailClient *mailer.Mailer,
 	jwtManager *utils.JWTManager,
 	infoLogger *slog.Logger,
 	warnLogger *slog.Logger,
 	errorLogger *slog.Logger,
+	startTime time.Time,
 ) *chi.Mux {
 	r := chi.NewMux()
 
@@ -41,31 +45,50 @@ func NewRouter(
 	r.Use(customMiddleware.RequestLogger(infoLogger))
 	r.Use(customMiddleware.Recoverer(errorLogger))
 
-	// 2. Repositories
+	// 2. Repositories & Caches
 	authRepo := database.NewAuthRepository(pool)
+	serviceRepo := database.NewServiceRepository(pool)
+	tokenCache := database.NewTokenCache(rdb, warnLogger)
 
 	// 3. Services
 	authSvc := services.NewAuthService(
 		authRepo,
 		jwtManager,
+		tokenCache,
 		mailClient,
 		cfg,
 		infoLogger,
 		warnLogger,
 		errorLogger,
 	)
+	serviceSvc := services.NewServiceService(
+		serviceRepo,
+		tokenCache,
+		cfg.JWTAccessSecret,
+		cfg.JWTAccessTTL,
+		infoLogger,
+		warnLogger,
+		errorLogger,
+	)
 
 	// 4. Middlewares & Handlers
-	authMW := customMiddleware.NewAuthMiddleware(jwtManager, pool, warnLogger, errorLogger)
+	authMW := customMiddleware.NewAuthMiddleware(jwtManager, pool, tokenCache, cfg.JWTAccessTTL, warnLogger, errorLogger)
 	authH := handlers.NewAuthHandler(authSvc, jwtManager)
 	userH := handlers.NewUserHandler(authSvc, authRepo)
 	sessionH := handlers.NewSessionHandler(authSvc)
+	serviceH := handlers.NewServiceHandler(serviceSvc)
+	healthH := handlers.NewHealthHandler(pool, rdb, startTime)
+
+	// Register top-level /health route
+	RegisterHealthRoutes(r, healthH)
 
 	// 5. Mount API Version Group
 	r.Route("/api/v1", func(api chi.Router) {
+		RegisterHealthRoutes(api, healthH)
 		RegisterAuthRoutes(api, authH, authMW)
 		RegisterUserRoutes(api, userH, authMW)
 		RegisterSessionRoutes(api, sessionH, authMW)
+		RegisterServiceRoutes(api, serviceH, authMW)
 	})
 
 	return r

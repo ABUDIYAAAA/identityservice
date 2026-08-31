@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"strings"
 	"time"
 
 	"devclub.com/identity/internal/api/config"
@@ -43,9 +44,16 @@ func NewMailer(cfg *config.Config, logger *slog.Logger) (*Mailer, error) {
 		return nil, fmt.Errorf("failed to parse reset template: %w", err)
 	}
 
+	fromAddr := strings.TrimSpace(cfg.MailFrom)
+	if fromAddr == "" {
+		fromAddr = cfg.MailUsername
+	} else if !strings.Contains(fromAddr, "@") && cfg.MailUsername != "" {
+		fromAddr = fmt.Sprintf("%s <%s>", fromAddr, cfg.MailUsername)
+	}
+
 	return &Mailer{
 		client: client,
-		from:   cfg.MailFrom,
+		from:   fromAddr,
 		templates: map[string]*template.Template{
 			"invite": inviteTpl,
 			"reset":  resetTpl,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"devclub.com/identity/internal/api/models"
@@ -292,6 +293,11 @@ func (r *PostgresAuthRepository) GetInvitationByHash(ctx context.Context, tokenH
 // =========================================================================
 
 func (r *PostgresAuthRepository) CreateSession(ctx context.Context, userID, tokenHash, userAgent, ip string, expiresAt time.Time) (*models.RefreshTokenSession, error) {
+	// Strip port if present in ip string (e.g. "[::1]:52365" -> "::1")
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+
 	query := `
 		INSERT INTO refresh_tokens (user_id, token_hash, user_agent, ip_address, expires_at)
 		VALUES ($1, $2, $3, NULLIF($4, '')::inet, $5)

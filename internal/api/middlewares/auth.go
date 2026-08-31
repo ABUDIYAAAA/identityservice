@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"devclub.com/identity/internal/database"
 	"devclub.com/identity/pkg/utils"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,14 +26,18 @@ const (
 type AuthMiddleware struct {
 	jwtManager *utils.JWTManager
 	db         *pgxpool.Pool
+	tokenCache database.TokenCache
+	accessTTL  time.Duration
 	warnLog    *slog.Logger
 	errorLog   *slog.Logger
 }
 
-func NewAuthMiddleware(jwtManager *utils.JWTManager, db *pgxpool.Pool, warnLog, errorLog *slog.Logger) *AuthMiddleware {
+func NewAuthMiddleware(jwtManager *utils.JWTManager, db *pgxpool.Pool, tokenCache database.TokenCache, accessTTL time.Duration, warnLog, errorLog *slog.Logger) *AuthMiddleware {
 	return &AuthMiddleware{
 		jwtManager: jwtManager,
 		db:         db,
+		tokenCache: tokenCache,
+		accessTTL:  accessTTL,
 		warnLog:    warnLog,
 		errorLog:   errorLog,
 	}
@@ -39,20 +45,24 @@ func NewAuthMiddleware(jwtManager *utils.JWTManager, db *pgxpool.Pool, warnLog, 
 
 func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			utils.Unauthorized(w, "Authorization header is required")
-			return
+		var tokenStr string
+
+		if cookie, err := r.Cookie(utils.AccessCookieName); err == nil && cookie.Value != "" {
+			tokenStr = cookie.Value
+		} else {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader != "" {
+				parts := strings.Split(authHeader, " ")
+				if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+					tokenStr = parts[1]
+				}
+			}
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			m.warnLog.Warn("malformed authorization header", "ip", r.RemoteAddr)
-			utils.Unauthorized(w, "Invalid authorization format. Expected 'Bearer <token>'")
+		if tokenStr == "" {
+			utils.Unauthorized(w, "Authentication cookie or token required")
 			return
 		}
-
-		tokenStr := parts[1]
 
 		claims, err := m.jwtManager.VerifyAccessToken(tokenStr)
 		if err != nil {
@@ -67,35 +77,70 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 
 		ctx := r.Context()
 
+		// 1. Check if token JTI is revoked (Redis fast path)
+		if m.tokenCache != nil {
+			if revoked, err := m.tokenCache.IsJTIRevoked(ctx, claims.ID); err == nil && revoked {
+				m.warnLog.Warn("revoked jti attempted access (cached)", "user_id", claims.UserID, "jti", claims.ID)
+				utils.Unauthorized(w, "Session has been revoked")
+				return
+			}
+		}
+
 		var isRevoked bool
-		revocationQuery := `SELECT EXISTS (SELECT 1 FROM revoked_tokens WHERE jti = $1)`
-		err = m.db.QueryRow(ctx, revocationQuery, claims.ID).Scan(&isRevoked)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			m.errorLog.Error("failed to check revoked tokens", "error", err, "jti", claims.ID)
-			utils.InternalServerError(w, err)
-			return
+		if m.db != nil {
+			revocationQuery := `SELECT EXISTS (SELECT 1 FROM revoked_tokens WHERE jti = $1)`
+			err = m.db.QueryRow(ctx, revocationQuery, claims.ID).Scan(&isRevoked)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				m.errorLog.Error("failed to check revoked tokens", "error", err, "jti", claims.ID)
+				utils.InternalServerError(w, err)
+				return
+			}
 		}
 
 		if isRevoked {
+			if m.tokenCache != nil {
+				_ = m.tokenCache.CacheRevokedJTI(ctx, claims.ID, m.accessTTL)
+			}
 			m.warnLog.Warn("revoked jti attempted access", "user_id", claims.UserID, "jti", claims.ID)
 			utils.Unauthorized(w, "Session has been revoked")
 			return
 		}
 
+		// 2. Check user version & status (Redis fast path)
 		var currentVersion int
 		var isActive bool
-		userQuery := `SELECT token_version, is_active FROM users WHERE id = $1`
+		foundInCache := false
 
-		err = m.db.QueryRow(ctx, userQuery, claims.UserID).Scan(&currentVersion, &isActive)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				m.warnLog.Warn("token subject user not found in database", "user_id", claims.UserID)
-				utils.Unauthorized(w, "User no longer exists")
+		if m.tokenCache != nil {
+			if status, found, err := m.tokenCache.GetUserStatus(ctx, claims.UserID); err == nil && found {
+				currentVersion = status.TokenVersion
+				isActive = status.IsActive
+				foundInCache = true
+			}
+		}
+
+		if !foundInCache {
+			if m.db == nil {
+				utils.InternalServerError(w, errors.New("database unavailable and status not cached"))
 				return
 			}
-			m.errorLog.Error("database query failed in auth middleware", "error", err, "user_id", claims.UserID)
-			utils.InternalServerError(w, err)
-			return
+			userQuery := `SELECT token_version, is_active FROM users WHERE id = $1`
+
+			err = m.db.QueryRow(ctx, userQuery, claims.UserID).Scan(&currentVersion, &isActive)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					m.warnLog.Warn("token subject user not found in database", "user_id", claims.UserID)
+					utils.Unauthorized(w, "User no longer exists")
+					return
+				}
+				m.errorLog.Error("database query failed in auth middleware", "error", err, "user_id", claims.UserID)
+				utils.InternalServerError(w, err)
+				return
+			}
+
+			if m.tokenCache != nil {
+				_ = m.tokenCache.CacheUserStatus(ctx, claims.UserID, currentVersion, isActive, m.accessTTL)
+			}
 		}
 
 		if !isActive {

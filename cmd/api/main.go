@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	startTime := time.Now()
 
 	infoLogger, warnLogger, errorLogger := utils.CreateLoggers()
 
@@ -32,10 +33,23 @@ func main() {
 
 	pool, err := database.NewPool(dbCtx, cfg.DBConn, errorLogger)
 	if err != nil {
-		errorLogger.Error("failed to initialize database pool", "error", err)
-		os.Exit(1)
+		warnLogger.Warn("database connection or ping failed on startup, service running in degraded mode", "error", err)
+	} else {
+		infoLogger.Info("database pool initialized successfully")
 	}
-	defer pool.Close()
+	if pool != nil {
+		defer pool.Close()
+	}
+
+	redisClient, err := database.NewRedisClient(dbCtx, cfg.RedisURL, cfg.RedisURI, cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword, cfg.RedisDB, errorLogger)
+	if err != nil {
+		warnLogger.Warn("redis connection or ping failed on startup, service running in degraded mode without cache", "error", err)
+	} else {
+		infoLogger.Info("redis client initialized successfully")
+	}
+	if redisClient != nil {
+		defer redisClient.Close()
+	}
 
 	// 4. Initialize Mailer
 	mailClient, err := mailer.NewMailer(cfg, infoLogger)
@@ -58,11 +72,13 @@ func main() {
 	r := router.NewRouter(
 		cfg,
 		pool,
+		redisClient,
 		mailClient,
 		jwtManager,
 		infoLogger,
 		warnLogger,
 		errorLogger,
+		startTime,
 	)
 
 	// 7. Setup HTTP Server
